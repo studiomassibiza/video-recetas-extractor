@@ -218,11 +218,20 @@ export const UrlExtractorBar: React.FC<Props> = ({
       setUrl('');
       setRawText('');
       setShowRawTextInput(false);
-      onShowToast(
-        'success', 
-        '¡Receta extraída con éxito!', 
-        `"${data.recipe.title}" (${ingCount} ingredientes, ${stepCount} pasos).`
-      );
+
+      if (data.missingApiKey) {
+        onShowToast(
+          'warning', 
+          'Receta extraída sin IA completa', 
+          'Configura la variable GEMINI_API_KEY en tu panel de Vercel (Settings > Environment Variables) para activar la IA en producción.'
+        );
+      } else {
+        onShowToast(
+          'success', 
+          '¡Receta extraída con éxito!', 
+          `"${data.recipe.title}" (${ingCount} ingredientes, ${stepCount} pasos).`
+        );
+      }
 
     } catch (err: any) {
       clearTimeout(stepTimer1);

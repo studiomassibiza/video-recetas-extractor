@@ -108,7 +108,7 @@ async function fetchPageMetadata(urlStr: string) {
   try {
     const clean = normalizeUrl(urlStr);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
+    const timeout = setTimeout(() => controller.abort(), 2500);
 
     const res = await fetch(clean, {
       signal: controller.signal,
@@ -207,7 +207,7 @@ async function fetchYouTubeOEmbed(urlStr: string) {
     const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(canonical)}&format=json`;
     
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4500);
+    const timeout = setTimeout(() => controller.abort(), 2000);
     const res = await fetch(oembedUrl, { signal: controller.signal });
     clearTimeout(timeout);
     
@@ -224,7 +224,7 @@ async function fetchYouTubeOEmbed(urlStr: string) {
     const canonical = ytId ? `https://www.youtube.com/watch?v=${ytId}` : normalizeUrl(urlStr);
     const noembedUrl = `https://noembed.com/embed?url=${encodeURIComponent(canonical)}`;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3500);
+    const timeout = setTimeout(() => controller.abort(), 2000);
     const res = await fetch(noembedUrl, { signal: controller.signal });
     clearTimeout(timeout);
     if (res.ok) {
@@ -511,69 +511,104 @@ app.post(["/api/extract-recipe", "/extract-recipe"], async (req, res) => {
     let authorName: string | null = null;
     let ytTranscript: string | null = null;
 
-    // 1. If URL is YouTube, attempt fast oEmbed + high-res thumbnail and description
+    // 1. If URL is YouTube, attempt fast parallel oEmbed + high-res thumbnail and description
     if (url && platform === 'youtube') {
       const ytId = extractYouTubeId(url);
       if (ytId) {
-        // Use maxresdefault for 16:9 crisp picture without black bars
         pageImage = `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`;
-        
-        // Fetch transcript for precise recipe extraction
-        try {
-          const { YoutubeTranscript } = await import('youtube-transcript');
-          // Pass the 11-char ytId directly so youtube-transcript avoids regex mismatches on shorts/mobile URLs
-          const transcriptPromise = YoutubeTranscript.fetchTranscript(ytId);
-          const transcriptTimeout = new Promise<any[]>((_, reject) => 
-            setTimeout(() => reject(new Error('Transcript timeout')), 3500)
-          );
-          const transcriptList = await Promise.race([transcriptPromise, transcriptTimeout]);
-          if (Array.isArray(transcriptList) && transcriptList.length > 0) {
-            ytTranscript = transcriptList.map((t: any) => t.text).join(' ');
-          }
-        } catch (err: any) {
-          // Captions may be disabled, not provided, or unavailable for this video; continue smoothly with metadata
-          console.log(`[YouTube] Note: Video transcript not available for ${ytId} (${err?.message || 'disabled/unavailable'}), continuing with description.`);
-        }
       }
-      
-      const oembed = await fetchYouTubeOEmbed(url);
-      if (oembed) {
-        pageTitle = oembed.title;
-        authorName = oembed.author_name;
-        // If oembed has a thumbnail and pageImage isn't set
-        if (!pageImage && oembed.thumbnail_url) {
-          pageImage = oembed.thumbnail_url;
-        }
+
+      const tasks: Promise<any>[] = [
+        fetchYouTubeOEmbed(url),
+        fetchPageMetadata(url)
+      ];
+
+      if (ytId) {
+        tasks.push(
+          (async () => {
+            try {
+              const { YoutubeTranscript } = await import('youtube-transcript');
+              const transcriptPromise = YoutubeTranscript.fetchTranscript(ytId);
+              const transcriptTimeout = new Promise<any[]>((_, reject) => 
+                setTimeout(() => reject(new Error('Timeout')), 2000)
+              );
+              const list = await Promise.race([transcriptPromise, transcriptTimeout]);
+              return { type: 'transcript', data: list };
+            } catch {
+              return { type: 'transcript', data: null };
+            }
+          })()
+        );
       }
-      // Also fetch page metadata to get YouTube video description/recipe
-      try {
-        const ytMeta = await fetchPageMetadata(url);
-        if (ytMeta.description) pageDescription = ytMeta.description;
-        if (!pageTitle && ytMeta.title) pageTitle = ytMeta.title;
-      } catch {
-        // ignore
+
+      const results = await Promise.allSettled(tasks);
+      const oembedRes = results[0]?.status === 'fulfilled' ? results[0].value : null;
+      const ytMetaRes = results[1]?.status === 'fulfilled' ? results[1].value : null;
+      const transcriptRes = results[2]?.status === 'fulfilled' ? results[2].value : null;
+
+      if (oembedRes) {
+        if (oembedRes.title) pageTitle = oembedRes.title;
+        if (oembedRes.author_name) authorName = oembedRes.author_name;
+        if (!pageImage && oembedRes.thumbnail_url) pageImage = oembedRes.thumbnail_url;
+      }
+      if (ytMetaRes) {
+        if (!pageTitle && ytMetaRes.title) pageTitle = ytMetaRes.title;
+        if (ytMetaRes.description) pageDescription = ytMetaRes.description;
+      }
+      if (transcriptRes?.data && Array.isArray(transcriptRes.data)) {
+        ytTranscript = transcriptRes.data.map((t: any) => t.text).join(' ');
       }
     }
 
-    // 2. If URL is TikTok
+    // 2. If URL is TikTok, run oEmbed and page metadata in parallel
     if (url && platform === 'tiktok') {
-      const ttOembed = await fetchTikTokOEmbed(url);
-      if (ttOembed) {
-        if (ttOembed.title) pageTitle = ttOembed.title;
-        if (ttOembed.author_name) authorName = ttOembed.author_name;
-        if (ttOembed.thumbnail_url && !pageImage) pageImage = ttOembed.thumbnail_url;
+      const [oembedRes, metaRes] = await Promise.allSettled([
+        fetchTikTokOEmbed(url),
+        fetchPageMetadata(url)
+      ]);
+      const oembed = oembedRes.status === 'fulfilled' ? oembedRes.value : null;
+      const meta = metaRes.status === 'fulfilled' ? metaRes.value : null;
+
+      if (oembed) {
+        if (oembed.title) pageTitle = oembed.title;
+        if (oembed.author_name) authorName = oembed.author_name;
+        if (oembed.thumbnail_url && !pageImage) pageImage = oembed.thumbnail_url;
+      }
+      if (meta) {
+        if (!pageTitle && meta.title) pageTitle = meta.title;
+        if (!pageDescription && meta.description) pageDescription = meta.description;
+        if (!pageImage && meta.image) pageImage = meta.image;
+        if (meta.blocked) isBlocked = true;
       }
     }
 
-    // 3. If URL is Instagram, TikTok, Facebook, or general Web
+    // 3. If URL is Instagram, Facebook, or general Web
     let schemaRecipe: any = null;
-    if (url && platform !== 'youtube') {
+    if (url && platform !== 'youtube' && platform !== 'tiktok') {
       const meta = await fetchPageMetadata(url);
       if (!pageTitle && meta.title) pageTitle = meta.title;
       if (!pageDescription && meta.description) pageDescription = meta.description;
       if (!pageImage && meta.image) pageImage = meta.image;
       if (meta.blocked) isBlocked = true;
       if (meta.jsonLdRecipe) schemaRecipe = meta.jsonLdRecipe;
+    }
+
+    // Extract dish or keyword hints from URL slug if title is missing or generic
+    if (url && (!pageTitle || !isValidRecipeTitle(pageTitle))) {
+      try {
+        const parsed = new URL(url.startsWith('http') ? url : `https://${url}`);
+        const segments = parsed.pathname.split('/').filter(Boolean);
+        const last = segments[segments.length - 1] || '';
+        const cleaned = decodeURIComponent(last)
+          .replace(/[-_]/g, ' ')
+          .replace(/\.(html|php|aspx)$/, '')
+          .trim();
+        if (cleaned.length > 3 && isValidRecipeTitle(cleaned)) {
+          pageTitle = cleaned.replace(/\b\w/g, c => c.toUpperCase());
+        }
+      } catch {
+        // ignore
+      }
     }
 
     // If Schema.org Recipe JSON-LD was found (many food blogs and cooking sites):
@@ -645,10 +680,15 @@ app.post(["/api/extract-recipe", "/extract-recipe"], async (req, res) => {
 
     const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.API_KEY || process.env.GEMINI_KEY;
 
+    if (!apiKey) {
+      console.warn("[API] GEMINI_API_KEY is not defined in environment variables! Using smart culinary engine.");
+    }
+
     // 5. Try Gemini API with prioritized models and automatic fallback
     if (apiKey && (contentToAnalyze.trim().length > 0 || pageTitle || rawText || url)) {
       const modelsToTry = [
-        "gemini-3.6-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-flash-latest",
         "gemini-3.8-flash"
       ];
       
@@ -695,7 +735,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la siguiente estructura exact
           });
 
           const controller = new AbortController();
-          const timeoutMs = 15000;
+          const timeoutMs = 8000;
           const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
           let rawJson = "";
@@ -806,7 +846,9 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la siguiente estructura exact
 
     return res.json({
       success: true,
-      extractedFrom: 'smart_culinary_engine',
+      extractedFrom: apiKey ? 'smart_culinary_engine' : 'smart_culinary_engine_no_key',
+      missingApiKey: !apiKey,
+      warning: !apiKey ? 'Variable GEMINI_API_KEY no detectada en Vercel. Configúrala en Settings > Environment Variables para activar la IA completa.' : undefined,
       recipe: fallbackRecipe
     });
 
@@ -881,7 +923,8 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con esta estructura exacta:
 
     if (apiKey) {
       const modelsToTry = [
-        "gemini-3.6-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-flash-latest",
         "gemini-3.8-flash"
       ];
       const imageParts = frames.slice(0, 4).map((dataUrl: string) => {
