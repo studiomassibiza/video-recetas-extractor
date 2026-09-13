@@ -7,6 +7,17 @@ const PORT = 3000;
 
 app.use(express.json({ limit: "15mb" }));
 
+// Enable CORS for Vercel preview environments, custom domains, and local dev
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+  next();
+});
+
 // Helper: Normalize URL string
 function normalizeUrl(urlStr?: string): string {
   if (!urlStr) return '';
@@ -89,7 +100,7 @@ async function fetchPageMetadata(urlStr: string) {
   try {
     const clean = normalizeUrl(urlStr);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 7000);
+    const timeout = setTimeout(() => controller.abort(), 4000);
 
     const res = await fetch(clean, {
       signal: controller.signal,

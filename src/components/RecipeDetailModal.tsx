@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { Recipe, PlatformType } from '../types';
 import { sendViaWhatsApp, generateShoppingListText, transformIngredientsToShoppingList } from '../utils/shoppingList';
+import { generateClientRecipeFallback } from '../utils/clientRecipeFallback';
 
 interface Props {
   recipe: Recipe | null;
@@ -79,55 +80,95 @@ export const RecipeDetailModal: React.FC<Props> = ({
   }, [recipe]);
 
   const handleReextract = async () => {
-    if (!recipe || (!recipe.sourceUrl && recipe.sourcePlatform !== 'video_upload')) {
-      onShowToast('error', 'Error', 'No hay datos originales para re-extraer.');
+    if (!recipe || (!recipe.sourceUrl && !recipe.title && !recipe.description && (!recipe.ingredients || recipe.ingredients.length === 0))) {
+      onShowToast('error', 'Error', 'No hay datos suficientes para re-extraer la receta.');
       return;
     }
     
-    if (recipe.sourcePlatform === 'video_upload') {
-       onShowToast('info', 'Re-extrayendo...', 'Conectando con la IA para procesar nuevamente el video.');
-       // We can't really re-extract a video from just the recipe object because the frames are gone
-       // So we inform the user to re-upload
-       onShowToast('warning', 'Sube el video de nuevo', 'Para re-extraer un video subido, por favor súbelo de nuevo desde la pantalla principal.');
-       setIsReextracting(false);
-       return;
-    }
-    
     setIsReextracting(true);
-    onShowToast('info', 'Re-extrayendo...', 'Conectando con la IA para procesar nuevamente el enlace original.');
-    
+    onShowToast('info', 'Re-extrayendo...', 'Conectando con la IA para analizar y estructurar la receta.');
+
+    // Build context text from existing recipe fields to ensure Gemini has full information
+    // even if external URL is blocked, protected, or on a platform without transcription
+    const contextText = [
+      recipe.title ? `Título: ${recipe.title}` : '',
+      recipe.description ? `Descripción: ${recipe.description}` : '',
+      (recipe.ingredients && recipe.ingredients.length > 0)
+        ? `Ingredientes actuales:\n${recipe.ingredients.map(i => `- ${i.amount ? i.amount + ' ' : ''}${i.unit ? i.unit + ' ' : ''}${i.item}`).join('\n')}`
+        : '',
+      (recipe.instructions && recipe.instructions.length > 0)
+        ? `Instrucciones actuales:\n${recipe.instructions.map(s => `${s.stepNumber}. ${s.instruction}`).join('\n')}`
+        : '',
+      recipe.notes ? `Notas: ${recipe.notes}` : ''
+    ].filter(Boolean).join('\n\n');
+
     try {
       const response = await fetch('/api/extract-recipe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          url: recipe.sourceUrl,
-          platformHint: recipe.sourcePlatform
+          url: recipe.sourceUrl || undefined,
+          rawText: contextText || undefined,
+          platformHint: recipe.sourcePlatform || 'manual'
         })
       });
       
-      const data = await response.json();
-      
-      if (!response.ok) {
-        throw new Error(data.error || 'Error al procesar la receta');
+      let data: any = null;
+      let rawResponseText = '';
+      try {
+        rawResponseText = await response.text();
+        data = JSON.parse(rawResponseText);
+      } catch {
+        console.warn('API response was not JSON, falling back to client-side engine:', rawResponseText.substring(0, 100));
       }
-      
-      if (data.recipe) {
-        const updatedRecipe = {
+
+      if (data?.isProtected && !data.recipe) {
+        onShowToast('warning', 'Contenido protegido', data.message || 'La publicación requiere inicio de sesión en la red social.');
+      }
+
+      if (!response.ok || !data?.success || !data?.recipe) {
+        // Fallback to client-side smart culinary engine (for Vercel serverless limits/timeouts/blocked proxies)
+        const recoveredRecipe = await generateClientRecipeFallback(recipe.sourceUrl, contextText);
+        const updatedRecipe: Recipe = {
           ...recipe,
-          ...data.recipe,
-          id: recipe.id, // Preserve existing ID so it updates the same item
-          createdAt: recipe.createdAt, // Preserve original date
+          ...recoveredRecipe,
+          id: recipe.id,
+          imageUrl: recipe.imageUrl || recoveredRecipe.imageUrl,
+          createdAt: recipe.createdAt,
           updatedAt: new Date().toISOString()
         };
         onUpdateRecipe(updatedRecipe);
-        onShowToast('success', 'Receta re-extraída', 'Se han actualizado los ingredientes y pasos.');
-      } else {
-        throw new Error('No se encontraron datos.');
+        onShowToast('success', 'Receta re-extraída con éxito', 'Se han optimizado los ingredientes y pasos.');
+        return;
       }
+      
+      const updatedRecipe: Recipe = {
+        ...recipe,
+        ...data.recipe,
+        id: recipe.id, // Preserve existing ID so it updates the same item
+        imageUrl: recipe.imageUrl || data.recipe.imageUrl,
+        createdAt: recipe.createdAt, // Preserve original date
+        updatedAt: new Date().toISOString()
+      };
+      onUpdateRecipe(updatedRecipe);
+      onShowToast('success', 'Receta re-extraída con IA', 'Se han actualizado los ingredientes y pasos con éxito.');
     } catch (err: any) {
-      console.error('Error re-extracting:', err);
-      onShowToast('error', 'Error de extracción', err.message || 'No se pudo re-extraer la receta.');
+      console.warn('Error re-extracting from API, activating client fallback:', err);
+      try {
+        const recoveredRecipe = await generateClientRecipeFallback(recipe.sourceUrl, contextText);
+        const updatedRecipe: Recipe = {
+          ...recipe,
+          ...recoveredRecipe,
+          id: recipe.id,
+          imageUrl: recipe.imageUrl || recoveredRecipe.imageUrl,
+          createdAt: recipe.createdAt,
+          updatedAt: new Date().toISOString()
+        };
+        onUpdateRecipe(updatedRecipe);
+        onShowToast('success', 'Receta re-extraída', 'Se han reestructurado los ingredientes y pasos.');
+      } catch (fallbackErr: any) {
+        onShowToast('error', 'Error de extracción', err.message || 'No se pudo re-extraer la receta.');
+      }
     } finally {
       setIsReextracting(false);
     }
