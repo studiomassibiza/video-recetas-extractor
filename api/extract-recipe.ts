@@ -1,9 +1,16 @@
-import app from '../server';
+import app from '../server.ts';
+
+export const config = {
+  maxDuration: 30,
+};
 
 export default function handler(req: any, res: any) {
-  // Ensure Express matches the extract-recipe route regardless of Vercel URL stripping
   req.url = '/api/extract-recipe';
+  if (req.body && typeof req.body === 'object') {
+    (req as any)._body = true;
+  }
   return app(req, res);
 }
 
 export { app };
+

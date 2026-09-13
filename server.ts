@@ -5,8 +5,6 @@ import { GoogleGenAI, Type } from "@google/genai";
 const app = express();
 const PORT = 3000;
 
-app.use(express.json({ limit: "15mb" }));
-
 // Enable CORS for Vercel preview environments, custom domains, and local dev
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -17,6 +15,16 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// If body was already parsed by Vercel / serverless runtime, mark it so express.json() doesn't attempt to re-read the consumed stream
+app.use((req, _res, next) => {
+  if (req.body !== undefined && req.body !== null) {
+    (req as any)._body = true;
+  }
+  next();
+});
+
+app.use(express.json({ limit: "15mb" }));
 
 // Helper: Normalize URL string
 function normalizeUrl(urlStr?: string): string {
@@ -635,7 +643,7 @@ app.post(["/api/extract-recipe", "/extract-recipe"], async (req, res) => {
       rawText ? `Texto / Transcripción ingresado por el usuario:\n${rawText}` : ''
     ].filter(Boolean).join('\n\n');
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.API_KEY || process.env.GEMINI_KEY;
 
     // 5. Try Gemini API with prioritized models and automatic fallback
     if (apiKey && (contentToAnalyze.trim().length > 0 || pageTitle || rawText || url)) {
@@ -839,7 +847,7 @@ app.post(["/api/extract-recipe-from-frames", "/extract-recipe-from-frames"], asy
       });
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || process.env.API_KEY || process.env.GEMINI_KEY;
     const prompt = `Eres un chef profesional y experto culinario. Analiza estos fotogramas extraídos de un video de cocina grabado o subido desde un teléfono móvil.
 ${videoTitle ? `Nombre del video/archivo: "${videoTitle}".` : ''}
 ${notes ? `Notas o indicaciones del usuario: "${notes}".` : ''}
